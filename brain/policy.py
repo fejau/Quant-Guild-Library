@@ -6,10 +6,9 @@ THESIS_AUTONOMY_POLICY = """
 PORTFOLIO RESEARCH POLICY:
 - Broker facts must come from tools; never invent prices, positions, orders, or fills.
 - Saved objectives constrain recommendations but never authorize a transaction.
-- Automated reviews are research-only: never stage or submit an order.
-- A human may explicitly ask for an order proposal during an interactive session.
-  In an enabled staging mode, that proposal remains unsubmitted until separately
-  approved in the local UI. In readonly mode, provide analysis only.
+- Strategy chat and automated reviews are research-only: never stage or submit an
+  order. A human enters proposals in the local Order Control form and separately
+  approves them.
 - Do not invent tickers merely to deploy idle cash.
 """.strip()
 

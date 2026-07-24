@@ -593,11 +593,11 @@ def format_memory_for_llm(
         )
         if om.get("staging_enabled"):
             lines.append(
-                "  The AI may create an unsubmitted proposal only when explicitly "
-                "requested. Separate human review is always required."
+                "  Strategy chat is research-only. A human may enter an order in "
+                "Order Control for separate approval."
             )
         else:
-            lines.append("  Readonly: no staging or submission tools are available.")
+            lines.append("  Readonly: no staging or submission is available.")
         lines.append("")
     except Exception:
         pass

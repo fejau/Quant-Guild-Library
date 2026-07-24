@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from copy import deepcopy
 from typing import Any
 from urllib.parse import urlparse
 
 from config import get_settings, trading_mode_status
 
 from . import get_account_summary, get_gateway, get_portfolio
+
+_CACHE_LOCK = threading.Lock()
+_CACHE_AT = 0.0
+_CACHE_RESULT: dict[str, Any] | None = None
 
 
 def _money(value: float | None, *, signed: bool = False) -> str:
@@ -30,9 +37,8 @@ def _summary_map(rows: list[dict[str, Any]]) -> dict[str, float]:
 def _holdings(
     items: list[dict[str, Any]],
     nav: float | None,
-    exchange_rates: dict[str, float],
 ) -> list[dict[str, Any]]:
-    out = []
+    grouped: dict[str, dict[str, Any]] = {}
     for item in items:
         qty = float(item.get("position") or 0)
         if qty == 0:
@@ -41,40 +47,88 @@ def _holdings(
         avg_cost = float(item.get("averageCost") or 0)
         value = float(item.get("marketValue") or qty * price)
         unrealized = float(item.get("unrealizedPNL") or 0)
-        currency = str(item.get("currency") or "BASE").upper()
-        fx = exchange_rates.get(currency, 1.0)
-        value_base = value * fx
-        basis = abs(avg_cost * qty)
-        out.append(
-            {
-                "symbol": str(item.get("symbol") or "").upper(),
-                "name": str(item.get("symbol") or "").upper(),
-                "qty": qty,
-                "last": round(price, 4),
-                "avg_cost": round(avg_cost, 4),
-                "mkt_value": round(value_base, 2),
-                "pnl_pct": round((unrealized / basis * 100) if basis else 0, 2),
-                "weight": round((value_base / nav * 100) if nav else 0, 2),
-                "sector": "",
-                "unrealized_pnl": round(unrealized, 2),
-                "conid": item.get("conid"),
-            }
+        fx = float(
+            item.get("reporting_exchange_rate")
+            or item.get("base_exchange_rate")
+            or 1
         )
+        value_base = value * fx
+        unrealized_base = unrealized * fx
+        basis_base = abs(avg_cost * qty) * fx
+        symbol = str(item.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        group = grouped.setdefault(
+            symbol,
+            {
+                "symbol": symbol,
+                "name": symbol,
+                "qty": 0.0,
+                "last": price,
+                "basis_base": 0.0,
+                "mkt_value": 0.0,
+                "unrealized_pnl": 0.0,
+                "accounts": set(),
+                "conids": set(),
+                "sector": "",
+            },
+        )
+        group["qty"] += qty
+        group["last"] = price or group["last"]
+        group["basis_base"] += basis_base
+        group["mkt_value"] += value_base
+        group["unrealized_pnl"] += unrealized_base
+        if item.get("account"):
+            group["accounts"].add(str(item["account"]))
+        if item.get("conid") is not None:
+            group["conids"].add(item["conid"])
+
+    out = []
+    for group in grouped.values():
+        basis = group.pop("basis_base")
+        accounts = sorted(group["accounts"])
+        conids = sorted(group.pop("conids"))
+        group["accounts"] = accounts
+        group["account_count"] = len(accounts)
+        group["conid"] = conids[0] if len(conids) == 1 else None
+        group["avg_cost"] = (
+            round(basis / abs(group["qty"]), 4) if group["qty"] else 0.0
+        )
+        group["mkt_value"] = round(group["mkt_value"], 2)
+        group["unrealized_pnl"] = round(group["unrealized_pnl"], 2)
+        group["pnl_pct"] = round(
+            (group["unrealized_pnl"] / basis * 100) if basis else 0,
+            2,
+        )
+        group["weight"] = round(
+            (group["mkt_value"] / nav * 100) if nav else 0,
+            2,
+        )
+        group["last"] = round(group["last"], 4)
+        out.append(group)
     return sorted(out, key=lambda row: abs(row["mkt_value"]), reverse=True)
 
 
-def _metrics(tags: dict[str, float]) -> list[dict[str, Any]]:
+def _metrics(
+    tags: dict[str, float],
+    account_count: int,
+    reporting_currency: str,
+) -> list[dict[str, Any]]:
     nav = tags.get("NetLiquidation")
     cash = tags.get("TotalCashValue")
     unrealized = tags.get("UnrealizedPnL")
     gross = tags.get("GrossPositionValue")
+    source = (
+        f"{account_count} IBKR account{'s' if account_count != 1 else ''} "
+        f"· {reporting_currency}"
+    )
     return [
-        {"id": "nav", "label": "PORTFOLIO NAV", "value": _money(nav), "delta": "IBKR", "tone": "neutral"},
-        {"id": "cash", "label": "CASH", "value": _money(cash), "delta": "IBKR", "tone": "neutral"},
-        {"id": "buying_power", "label": "BUYING POWER", "value": _money(tags.get("BuyingPower")), "delta": "IBKR", "tone": "neutral"},
-        {"id": "unrealized", "label": "UNREALIZED P&L", "value": _money(unrealized, signed=True), "delta": "IBKR", "tone": "up" if (unrealized or 0) >= 0 else "down"},
-        {"id": "day_pnl", "label": "REALIZED P&L", "value": _money(tags.get("RealizedPnL"), signed=True), "delta": "IBKR", "tone": "neutral"},
-        {"id": "gross", "label": "GROSS EXPOSURE", "value": _money(gross), "delta": "IBKR", "tone": "neutral"},
+        {"id": "nav", "label": "PORTFOLIO NAV", "value": _money(nav), "delta": source, "tone": "neutral"},
+        {"id": "cash", "label": "CASH", "value": _money(cash), "delta": source, "tone": "neutral"},
+        {"id": "buying_power", "label": "BUYING POWER", "value": _money(tags.get("BuyingPower")), "delta": source, "tone": "neutral"},
+        {"id": "unrealized", "label": "UNREALIZED P&L", "value": _money(unrealized, signed=True), "delta": source, "tone": "up" if (unrealized or 0) >= 0 else "down"},
+        {"id": "day_pnl", "label": "REALIZED P&L", "value": _money(tags.get("RealizedPnL"), signed=True), "delta": source, "tone": "neutral"},
+        {"id": "gross", "label": "GROSS EXPOSURE", "value": _money(gross), "delta": source, "tone": "neutral"},
     ]
 
 
@@ -99,49 +153,67 @@ def connection_info(*, connected: bool, error: str | None = None) -> dict[str, A
 
 
 def fetch_live_portfolio_for_ui() -> dict[str, Any]:
-    try:
-        session = get_gateway().session()
-        if not session.get("ok"):
-            raise RuntimeError(session.get("error") or "IBKR session unavailable")
-        summary = get_account_summary()
-        if not summary.get("ok"):
-            raise RuntimeError(summary.get("error") or "Account summary unavailable")
-        portfolio = get_portfolio()
-        if not portfolio.get("ok"):
-            raise RuntimeError(portfolio.get("error") or "Portfolio unavailable")
-        tags = _summary_map(summary.get("summary") or [])
-        exchange_rates = {
-            str(currency).upper(): float(node.get("exchangerate") or 1)
-            for currency, node in (summary.get("ledger") or {}).items()
-            if isinstance(node, dict)
-        }
-        exchange_rates["BASE"] = 1.0
-        nav = tags.get("NetLiquidation")
-        cash = tags.get("TotalCashValue") or tags.get("AvailableFunds")
-        return {
-            "ok": True,
-            "source": "ibkr",
-            "holdings": _holdings(
-                portfolio.get("portfolio") or [],
-                nav,
-                exchange_rates,
-            ),
-            "metrics": _metrics(tags),
-            "nav": nav,
-            "cash": cash,
-            "accounts": summary.get("accounts") or [],
-            "connection": connection_info(connected=True),
-        }
-    except Exception as exc:
-        error = f"{type(exc).__name__}: {exc}"
-        return {
-            "ok": False,
-            "source": "error",
-            "holdings": [],
-            "metrics": [],
-            "nav": None,
-            "cash": None,
-            "accounts": [],
-            "connection": connection_info(connected=False, error=error),
-            "error": error,
-        }
+    global _CACHE_AT, _CACHE_RESULT
+    with _CACHE_LOCK:
+        if _CACHE_RESULT is not None and time.monotonic() - _CACHE_AT < 3:
+            return deepcopy(_CACHE_RESULT)
+        try:
+            session = get_gateway().session()
+            if not session.get("ok"):
+                raise RuntimeError(session.get("error") or "IBKR session unavailable")
+            summary = get_account_summary()
+            if not summary.get("ok"):
+                raise RuntimeError(summary.get("error") or "Account summary unavailable")
+            if summary.get("aggregation_error"):
+                raise RuntimeError(summary["aggregation_error"])
+            portfolio = get_portfolio(account_context=summary)
+            if not portfolio.get("ok"):
+                raise RuntimeError(portfolio.get("error") or "Portfolio unavailable")
+            tags = _summary_map(summary.get("summary") or [])
+            nav = tags.get("NetLiquidation")
+            cash = tags.get("TotalCashValue") or tags.get("AvailableFunds")
+            account_count = int(summary.get("account_count") or 0)
+            connection = connection_info(connected=True)
+            connection["account_count"] = account_count
+            connection["accounts"] = summary.get("accounts") or []
+            connection["label"] = (
+                f"IBKR Client Portal · {account_count} "
+                f"account{'s' if account_count != 1 else ''}"
+            )
+            result = {
+                "ok": True,
+                "source": "ibkr",
+                "holdings": _holdings(
+                    portfolio.get("portfolio") or [],
+                    nav,
+                ),
+                "metrics": _metrics(
+                    tags,
+                    account_count,
+                    str(summary.get("reporting_currency") or ""),
+                ),
+                "nav": nav,
+                "cash": cash,
+                "accounts": summary.get("accounts") or [],
+                "account_count": account_count,
+                "account_summaries": summary.get("account_summaries") or [],
+                "connection": connection,
+            }
+        except Exception as exc:
+            error = f"{type(exc).__name__}: {exc}"
+            result = {
+                "ok": False,
+                "source": "error",
+                "holdings": [],
+                "metrics": [],
+                "nav": None,
+                "cash": None,
+                "accounts": [],
+                "account_count": 0,
+                "account_summaries": [],
+                "connection": connection_info(connected=False, error=error),
+                "error": error,
+            }
+        _CACHE_AT = time.monotonic()
+        _CACHE_RESULT = result
+        return deepcopy(result)

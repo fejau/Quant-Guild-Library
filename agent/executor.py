@@ -6,7 +6,6 @@ import json
 from typing import Any, Callable
 
 from brain import brain_overview, record_trade, upsert_thesis
-from config import get_settings
 from ib_bridge import (
     get_account_summary,
     get_historical_bars,
@@ -17,8 +16,6 @@ from ib_bridge import (
     qualify_stock,
 )
 from risk import get_portfolio_objectives, propose_position_size
-from trading import stage_equity_order
-
 Handler = Callable[..., dict[str, Any]]
 
 
@@ -58,10 +55,7 @@ _READ_HANDLERS: dict[str, Handler] = {
 
 
 def available_tools() -> list[str]:
-    names = list(_READ_HANDLERS)
-    if get_settings(require_openai=False).staging_enabled:
-        names.append("stage_equity_order")
-    return sorted(names)
+    return sorted(_READ_HANDLERS)
 
 
 def execute_tool(name: str, arguments: dict[str, Any] | str | None) -> str:
@@ -74,13 +68,15 @@ def execute_tool(name: str, arguments: dict[str, Any] | str | None) -> str:
     if not isinstance(args, dict):
         return json.dumps({"ok": False, "error": "Tool arguments must be an object"})
 
-    handler = _READ_HANDLERS.get(name)
     if name == "stage_equity_order":
-        if not get_settings(require_openai=False).staging_enabled:
-            return json.dumps(
-                {"ok": False, "submitted": False, "error": "Staging disabled in readonly mode"}
-            )
-        handler = stage_equity_order
+        return json.dumps(
+            {
+                "ok": False,
+                "submitted": False,
+                "error": "Strategy chat cannot stage orders; use local Order Control",
+            }
+        )
+    handler = _READ_HANDLERS.get(name)
     if handler is None:
         return json.dumps(
             {"ok": False, "error": f"Unknown or unavailable tool: {name}"}

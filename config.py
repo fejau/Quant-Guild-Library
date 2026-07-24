@@ -13,6 +13,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 LOCAL_ENV_PATH = PROJECT_ROOT / ".env"
 LIVE_CONFIRM_VALUE = "I_UNDERSTAND_LIVE_IBKR_RISK"
 VALID_TRADING_MODES = frozenset({"readonly", "paper", "live"})
+VALID_CHAT_PROVIDERS = frozenset({"codex", "openai"})
+SHARED_IBKR_KEYS = frozenset({"GATEWAY_URL", "IBKR_ACCOUNT_ID"})
 
 
 def _env_values() -> dict[str, str]:
@@ -37,7 +39,7 @@ def _env_values() -> dict[str, str]:
             shared = {
                 key: str(value)
                 for key, value in dotenv_values(path).items()
-                if value is not None
+                if value is not None and key in SHARED_IBKR_KEYS
             }
     merged = {**shared, **local_raw}
     merged.update({key: str(value) for key, value in os.environ.items()})
@@ -75,10 +77,16 @@ def _symbols(raw: str | None) -> frozenset[str]:
 
 @dataclass(frozen=True)
 class Settings:
+    strategy_chat_provider: str
+    codex_bin: str
+    codex_chat_model: str
+    codex_reasoning_effort: str
+    codex_timeout_seconds: int
     openai_api_key: str
     openai_model: str
     agent_max_iterations: int
     gateway_url: str
+    ibkr_reporting_currency: str
     ibkr_account_id: str
     trading_mode: str
     live_trading_enabled: bool
@@ -117,6 +125,9 @@ class Settings:
 
 def get_settings(*, require_openai: bool = True) -> Settings:
     values = _env_values()
+    chat_provider = values.get("STRATEGY_CHAT_PROVIDER", "codex").strip().lower()
+    if chat_provider not in VALID_CHAT_PROVIDERS:
+        raise RuntimeError("STRATEGY_CHAT_PROVIDER must be one of: codex, openai")
     mode = values.get("IBKR_TRADING_MODE", "readonly").strip().lower()
     if mode not in VALID_TRADING_MODES:
         raise RuntimeError(
@@ -124,10 +135,9 @@ def get_settings(*, require_openai: bool = True) -> Settings:
         )
 
     key = values.get("OPENAI_API_KEY", "").strip()
-    if require_openai and not key:
+    if require_openai and chat_provider == "openai" and not key:
         raise RuntimeError(
-            "OPENAI_API_KEY is not set. The IBKR dashboard remains available, "
-            "but chat requires a key in the local .env."
+            "OPENAI_API_KEY is required when STRATEGY_CHAT_PROVIDER=openai."
         )
 
     max_notional = _float(values, "IBKR_MAX_ORDER_NOTIONAL", 500.0)
@@ -139,14 +149,30 @@ def get_settings(*, require_openai: bool = True) -> Settings:
         raise RuntimeError("IBKR_MAX_POSITION_PCT must be between 0 and 1")
     if not 60 <= stage_ttl <= 86400:
         raise RuntimeError("IBKR_STAGE_TTL_SECONDS must be between 60 and 86400")
+    codex_timeout = _int(values, "CODEX_CHAT_TIMEOUT_SECONDS", 180)
+    if not 30 <= codex_timeout <= 600:
+        raise RuntimeError("CODEX_CHAT_TIMEOUT_SECONDS must be between 30 and 600")
+    reporting_currency = values.get("IBKR_REPORTING_CURRENCY", "CAD").strip().upper()
+    if len(reporting_currency) != 3 or not reporting_currency.isalpha():
+        raise RuntimeError("IBKR_REPORTING_CURRENCY must be a 3-letter currency code")
 
     return Settings(
+        strategy_chat_provider=chat_provider,
+        codex_bin=values.get("CODEX_BIN", "codex").strip(),
+        codex_chat_model=values.get(
+            "CODEX_CHAT_MODEL", "gpt-5.4"
+        ).strip(),
+        codex_reasoning_effort=values.get(
+            "CODEX_REASONING_EFFORT", "medium"
+        ).strip(),
+        codex_timeout_seconds=codex_timeout,
         openai_api_key=key,
         openai_model=values.get("OPENAI_MODEL", "gpt-4o").strip(),
         agent_max_iterations=_int(values, "AGENT_MAX_ITERATIONS", 12),
         gateway_url=values.get(
             "GATEWAY_URL", "https://localhost:5001/v1/api"
         ).strip(),
+        ibkr_reporting_currency=reporting_currency,
         ibkr_account_id=values.get("IBKR_ACCOUNT_ID", "").strip(),
         trading_mode=mode,
         live_trading_enabled=_bool(values, "IBKR_LIVE_TRADING_ENABLED"),

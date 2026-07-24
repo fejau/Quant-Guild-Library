@@ -93,7 +93,9 @@ def propose_position_size(
     risk_label = str(objectives.get("risk_tolerance", "moderate")).strip().lower()
     risk_frac = RISK_PER_TRADE.get(risk_label, 0.01)
 
-    acct = get_account_summary()
+    # Sizing is for the explicitly selected trading account, never the
+    # consolidated read-only view.
+    acct = get_account_summary(all_accounts=False)
     if not acct.get("ok"):
         return acct
     tags = _summary_map(acct.get("summary") or [])
@@ -114,7 +116,7 @@ def propose_position_size(
     if cash is None:
         cash = 0.0
 
-    port = get_portfolio()
+    port = get_portfolio(all_accounts=False)
     if not port.get("ok"):
         return port
 
@@ -124,7 +126,10 @@ def propose_position_size(
     for item in port.get("portfolio") or []:
         if str(item.get("symbol", "")).upper() == symbol:
             quote_currency = str(item.get("currency") or "USD").upper()
-            fx = exchange_rates.get(quote_currency, 1.0)
+            fx = float(
+                item.get("base_exchange_rate")
+                or exchange_rates.get(quote_currency, 1.0)
+            )
             current_mv += float(item.get("marketValue") or 0) * fx
             current_qty += float(item.get("position") or 0)
 

@@ -1,8 +1,8 @@
-"""OpenAI tool schemas for research and human-approved order staging."""
+"""OpenAI tool schemas for research-only strategy chat."""
 
 from __future__ import annotations
 
-from config import Settings, get_settings
+from config import Settings
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str] | None = None) -> dict:
@@ -110,33 +110,13 @@ READ_TOOLS = [
     ),
 ]
 
-STAGE_TOOL = _tool(
-    "stage_equity_order",
-    (
-        "Create a short-lived order proposal for separate human review. "
-        "This never submits to IBKR and is unavailable in readonly mode."
-    ),
-    {
-        "symbol": {"type": "string"},
-        "side": {"type": "string", "enum": ["BUY", "SELL"]},
-        "quantity": {"type": "integer", "minimum": 1},
-        "order_type": {"type": "string", "enum": ["LMT", "MKT"], "default": "LMT"},
-        "limit_price": {"type": "number", "exclusiveMinimum": 0},
-        "tif": {"type": "string", "enum": ["DAY", "GTC"], "default": "DAY"},
-        "outside_rth": {"type": "boolean", "default": False},
-        "rationale": {"type": "string"},
-    },
-    ["symbol", "side", "quantity"],
-)
-
-
 def tool_definitions(settings: Settings | None = None) -> list[dict]:
-    active = settings or get_settings(require_openai=False)
-    return [*READ_TOOLS, STAGE_TOOL] if active.staging_enabled else list(READ_TOOLS)
+    del settings
+    return list(READ_TOOLS)
 
 
 # Kept for compatibility with callers/tests that import this constant. It is the
-# safe, readonly set; TradingAgent calls tool_definitions() for the active mode.
+# safe, readonly set.
 TOOL_DEFINITIONS = READ_TOOLS
 
 SYSTEM_PROMPT = """You are an IBKR-connected portfolio research assistant.
@@ -147,10 +127,9 @@ orders, order ids, submissions, or fills.
 
 Safety boundary:
 - You cannot submit or cancel broker orders.
-- In readonly mode, you cannot even stage an order.
-- In paper/live staging mode, stage_equity_order only creates a proposal. Clearly
-  say it is unsubmitted and requires separate human review in the local UI.
-- Never claim that a staged proposal was approved, submitted, accepted, or filled.
+- You cannot stage an order. Proposals must be entered manually in the separate
+  local Order Control form and require separate human approval.
+- Never claim that a proposal was staged, approved, submitted, accepted, or filled.
 - Never ask for or expose IBKR credentials, account ids, API keys, or secrets.
 - Never infer a ticker and trade it merely because cash is available.
 
@@ -161,6 +140,5 @@ Research workflow:
 4. Save theses only when the user requested research or a materially supported
    thesis update. Record trade notes as recommendations unless a broker read
    confirms another status.
-5. If proposing an action, explain sizing and risks. In staging modes you may
-   stage only an explicit, fully specified proposal within server controls.
+5. If proposing an action, explain sizing and risks without taking the action.
 """

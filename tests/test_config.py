@@ -39,3 +39,11 @@ def test_paper_requires_du_account(monkeypatch) -> None:
     assert get_settings(require_openai=False).submission_armed is False
     monkeypatch.setenv("IBKR_ACCOUNT_ID", "DU123456")
     assert get_settings(require_openai=False).submission_armed is True
+
+
+def test_codex_provider_does_not_require_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("STRATEGY_CHAT_PROVIDER", "codex")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    settings = get_settings()
+    assert settings.strategy_chat_provider == "codex"
+    assert settings.openai_api_key == ""

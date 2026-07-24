@@ -13,6 +13,7 @@ dist/
 
 # Runtime state contains account-derived portfolio data and must stay local.
 data/*.json
+data/codex-chat-runtime/
 data/*.tmp
 data/*.lock
 

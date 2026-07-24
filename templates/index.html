@@ -74,7 +74,9 @@
                   data-symbol="{{ h.symbol }}"
                   tabindex="0"
                 >
-                  <td class="sym">{{ h.symbol }}</td>
+                  <td class="sym">
+                    {{ h.symbol }}{% if h.account_count and h.account_count > 1 %}<small> ×{{ h.account_count }}</small>{% endif %}
+                  </td>
                   <td class="num">{{ "%.2f"|format(h.last) }}</td>
                   <td class="num {% if h.pnl_pct >= 0 %}up{% else %}down{% endif %}">
                     {{ "%+.2f"|format(h.pnl_pct) }}
@@ -277,6 +279,21 @@
               {% if trading.blockers %}BLOCKERS: {{ trading.blockers | join(', ') }}{% endif %}
             </span>
           </div>
+          <form
+            class="manual-order-form{% if not trading.staging_enabled %} is-hidden{% endif %}"
+            id="manual-order-form"
+            autocomplete="off"
+          >
+            <input id="order-symbol" name="symbol" maxlength="12" placeholder="SYMBOL" required />
+            <select id="order-side" name="side" aria-label="Order side">
+              <option value="BUY">BUY</option>
+              <option value="SELL">SELL</option>
+            </select>
+            <input id="order-quantity" name="quantity" type="number" min="1" step="1" placeholder="QTY" required />
+            <input id="order-limit-price" name="limit_price" type="number" min="0.0001" step="0.0001" placeholder="LIMIT" required />
+            <button type="submit" class="text-btn primary">STAGE PROPOSAL</button>
+            <span id="manual-order-status"></span>
+          </form>
           <div class="staged-orders" id="staged-orders">
             <div class="order-empty">No staged proposals.</div>
           </div>
@@ -297,6 +314,9 @@
               </div>
             </div>
             <div class="panel-head-actions">
+              <span class="panel-tag" id="chat-provider-tag">
+                {{ 'CODEX OAUTH' if chat_provider == 'codex' else 'OPENAI API' }}
+              </span>
               <div class="auto-controls">
                 <label class="auto-toggle" title="Research-only portfolio review on a background thread">
                   <input type="checkbox" id="auto-toggle" {% if ux and ux.automated %}checked{% endif %} />

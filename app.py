@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
 
-from agent import TradingAgent
+from agent import codex_auth_status, get_strategy_agent
 from brain import (
     append_turn,
     brain_overview,
@@ -36,7 +36,7 @@ from brain.policy import auto_sweep_prompt, build_auto_sweep_context
 from config import get_settings, trading_mode_status
 from ib_bridge.ui_portfolio import connection_info, fetch_live_portfolio_for_ui
 from risk.objectives import load_objectives
-from trading import OrderStore, approval_phrase, submit_staged_order
+from trading import OrderStore, stage_equity_order, submit_staged_order
 
 app = Flask(__name__)
 LOCAL_ACTION_TOKEN = secrets.token_urlsafe(32)
@@ -223,7 +223,7 @@ def index():
         )
     elif view["source"] == "ibkr" and not view["book"]:
         ibkr_note = (
-            "Connected to the configured IBKR account, but no stock positions "
+            "Connected to IBKR accounts, but no stock positions "
             "were returned."
         )
 
@@ -265,6 +265,7 @@ def index():
         connection=conn,
         ux=ux,
         trading=trading_mode_status(),
+        chat_provider=get_settings(require_openai=False).strategy_chat_provider,
         local_action_token=LOCAL_ACTION_TOKEN,
     )
 
@@ -306,6 +307,7 @@ def api_auto_run():
 @app.get("/api/status")
 def api_status():
     view = load_portfolio_view(persist=False)
+    settings = get_settings(require_openai=False)
     return jsonify(
         {
             "ok": view["source"] == "ibkr",
@@ -314,6 +316,15 @@ def api_status():
             "holdings_count": len(view["book"]),
             "error": view.get("error"),
             "brain": brain_overview(),
+            "chat": (
+                codex_auth_status(settings)
+                if settings.strategy_chat_provider == "codex"
+                else {
+                    "ok": bool(settings.openai_api_key),
+                    "provider": "openai",
+                    "authenticated": bool(settings.openai_api_key),
+                }
+            ),
         }
     )
 
@@ -321,6 +332,26 @@ def api_status():
 @app.get("/api/trading/status")
 def api_trading_status():
     return jsonify(trading_mode_status())
+
+
+@app.get("/api/chat/provider")
+def api_chat_provider():
+    settings = get_settings(require_openai=False)
+    if settings.strategy_chat_provider == "codex":
+        return jsonify(
+            {
+                **codex_auth_status(settings),
+                "model": settings.codex_chat_model,
+            }
+        )
+    return jsonify(
+        {
+            "ok": bool(settings.openai_api_key),
+            "provider": "openai",
+            "authenticated": bool(settings.openai_api_key),
+            "model": settings.openai_model,
+        }
+    )
 
 
 @app.get("/api/orders/staged")
@@ -331,6 +362,24 @@ def api_staged_orders():
             "trading": trading_mode_status(),
         }
     )
+
+
+@app.post("/api/orders/stage")
+def api_stage_order():
+    if not _authorized_order_action():
+        return jsonify({"error": "Local action authorization failed"}), 403
+    payload = request.get_json(silent=True) or {}
+    result = stage_equity_order(
+        symbol=str(payload.get("symbol") or ""),
+        side=str(payload.get("side") or ""),
+        quantity=payload.get("quantity"),
+        order_type=str(payload.get("order_type") or "LMT"),
+        limit_price=payload.get("limit_price"),
+        tif=str(payload.get("tif") or "DAY"),
+        outside_rth=False,
+        rationale=str(payload.get("rationale") or "Manual local proposal"),
+    )
+    return jsonify(result), 200 if result.get("ok") else 409
 
 
 @app.post("/api/orders/<order_id>/submit")
@@ -551,7 +600,7 @@ def api_chat():
         def event_stream():
             import json as _json
 
-            agent = TradingAgent(allow_staging=mode != "auto_review")
+            agent = get_strategy_agent()
             final_content = ""
             tool_calls = []
             try:
@@ -611,7 +660,7 @@ def api_chat():
         )
 
     try:
-        agent = TradingAgent(allow_staging=mode != "auto_review")
+        agent = get_strategy_agent()
         result = agent.run(
             message,
             symbol=symbol or None,
@@ -627,7 +676,7 @@ def api_chat():
                     "role": "assistant",
                     "content": (
                         f"Agent failed: {type(exc).__name__}: {exc}. "
-                        "Check OPENAI_API_KEY and the local IBKR Gateway session."
+                        "Check the strategy chat provider and local IBKR Gateway session."
                     ),
                 }
             ),

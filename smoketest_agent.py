@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from agent import TradingAgent
+from agent import get_strategy_agent
 from ib_bridge import disconnect_ib
 
 
 def main() -> None:
-    print("Running read-only TradingAgent (requires Gateway + OPENAI_API_KEY)...")
-    agent = TradingAgent(allow_staging=False)
+    print("Running read-only strategy chat (requires Gateway + configured provider)...")
+    agent = get_strategy_agent(allow_staging=False)
     result = agent.run(
         (
             "Read the configured account summary and positions. Summarize the "

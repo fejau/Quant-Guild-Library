@@ -108,7 +108,7 @@
         return (
           `<tr class="holding-row${selected ? " is-selected" : ""}" ` +
           `data-symbol="${h.symbol}" tabindex="0">` +
-          `<td class="sym">${h.symbol}</td>` +
+          `<td class="sym">${h.symbol}${Number(h.account_count || 0) > 1 ? ` <small>×${h.account_count}</small>` : ""}</td>` +
           `<td class="num">${Number(h.last).toFixed(2)}</td>` +
           `<td class="num ${pnlClass}">${sign}${pnl.toFixed(2)}</td>` +
           `<td class="num">${Number(h.weight).toFixed(2)}</td>` +
@@ -546,10 +546,10 @@
           ? ` UI last/marketPrice≈$${last.toFixed(2)}.`
           : "";
       const prompt = missing
-        ? `Research ${sym} and create an evidence-based thesis with narrative, target, cost basis, conviction, and key risks, then call save_thesis.${lastHint} Use IBKR portfolio and historical data. This is research-only; do not stage or claim any trade.`
+        ? `Research ${sym} and return an evidence-based thesis with narrative, target, cost basis, conviction, and key risks.${lastHint} Use IBKR portfolio and historical data. This is research-only; do not stage or claim any trade.`
         : `Re-evaluate the saved ${sym} thesis against current IBKR portfolio data and objectives.${lastHint} ` +
           `Identify material changes, concentration or cash-floor concerns, and whether the thesis remains supported. ` +
-          `Update save_thesis only if the evidence warrants it. This button is research-only: do not stage, submit, or claim any trade.`;
+          `Return any warranted thesis revision in the chat. This button is research-only: do not stage, submit, or claim any trade.`;
       await sendChatMessage(prompt);
     });
   }
@@ -936,6 +936,8 @@
   const tradingState = document.getElementById("trading-state");
   const tradingBlockers = document.getElementById("trading-blockers");
   const localActionToken = document.body.dataset.localActionToken || "";
+  const manualOrderForm = document.getElementById("manual-order-form");
+  const manualOrderStatus = document.getElementById("manual-order-status");
 
   function orderButton(label, className, handler) {
     const button = document.createElement("button");
@@ -1043,6 +1045,44 @@
     } catch (_) {
       /* keep the last known state */
     }
+  }
+
+  if (manualOrderForm) {
+    manualOrderForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const symbol = document.getElementById("order-symbol").value.trim().toUpperCase();
+      const side = document.getElementById("order-side").value;
+      const quantity = Number(document.getElementById("order-quantity").value);
+      const limitPrice = Number(document.getElementById("order-limit-price").value);
+      if (manualOrderStatus) manualOrderStatus.textContent = "STAGING…";
+      try {
+        const response = await fetch("/api/orders/stage", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Local-Action-Token": localActionToken,
+          },
+          body: JSON.stringify({
+            symbol,
+            side,
+            quantity,
+            order_type: "LMT",
+            limit_price: limitPrice,
+            tif: "DAY",
+            rationale: "Manual proposal from local order control",
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) throw new Error(payload.error || "staging failed");
+        if (manualOrderStatus) manualOrderStatus.textContent = "STAGED — REVIEW BELOW";
+        manualOrderForm.reset();
+        await refreshStagedOrders();
+      } catch (error) {
+        if (manualOrderStatus) {
+          manualOrderStatus.textContent = `BLOCKED: ${error.message || "error"}`;
+        }
+      }
+    });
   }
 
   refreshStagedOrders();

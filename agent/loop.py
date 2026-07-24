@@ -79,6 +79,10 @@ class TradingAgent:
         allow_staging: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
+        if client is None and not self.settings.openai_api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY is required for the OpenAI strategy-chat provider"
+            )
         self.client = client or OpenAI(api_key=self.settings.openai_api_key)
         self.allow_staging = allow_staging
 

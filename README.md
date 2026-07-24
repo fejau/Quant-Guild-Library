@@ -8,29 +8,54 @@ IBKR credentials never enter this application.
 
 The default mode is **read-only**:
 
-- portfolio, balances, positions, orders, market snapshots, and history can be read;
-- the AI can research and maintain theses;
-- no order-submission tool is available to the AI;
+- portfolio, balances, positions, and working orders are read across every
+  account returned by the authenticated Gateway;
+- common-currency account metrics are consolidated and same-symbol positions
+  are aggregated across accounts;
+- the strategy chat can research and reference saved theses;
+- the Codex strategy chat has no shell, connectors, web, staging, submission,
+  or cancellation capability;
 - automation performs research only;
 - no broker order endpoint is called.
 
-Trading can be armed later in `paper` or `live` mode. Even when armed, the AI
-can only stage an immutable order proposal. A person must approve that exact
-proposal from the local UI before the server submits it to IBKR.
+Trading can be armed later in `paper` or `live` mode. A person must manually
+enter an order proposal in the local Order Control form, then separately approve
+that exact immutable proposal before the server submits it to IBKR.
+
+## Strategy chat with Codex OAuth
+
+The default chat provider invokes the locally installed Codex CLI:
+
+```dotenv
+STRATEGY_CHAT_PROVIDER=codex
+CODEX_CHAT_MODEL=gpt-5.4
+CODEX_REASONING_EFFORT=medium
+```
+
+Run `codex login status` to confirm it says ChatGPT. The application delegates
+authentication to Codex and never opens, parses, copies, or forwards
+`~/.codex/auth.json` or keychain credentials.
+
+Each strategy turn runs ephemerally with user configuration ignored and shell,
+apps, hooks, subagents, plugins, web search, file writes, and approvals disabled.
+The server supplies a bounded, masked snapshot of all IBKR accounts as context.
+
+An API-key fallback remains available by setting
+`STRATEGY_CHAT_PROVIDER=openai` and `OPENAI_API_KEY`, but it is not required.
 
 ## Existing Fable gateway
 
 The local `.env` points at:
 
 ```text
-/Users/felixjauvin/Fable/.env
+/absolute/path/to/Fable/.env
 ```
 
 Only `GATEWAY_URL` and `IBKR_ACCOUNT_ID` are imported from that file. Local
-settings override shared values. The account id is never copied into Git. If
-Fable leaves the id blank, readonly mode uses the account currently selected by
-the authenticated Gateway session. Paper/live submission still requires an
-explicit `IBKR_ACCOUNT_ID` so trading can never follow an accidental selection.
+settings override shared values. The account id is never copied into Git.
+Readonly views include every account returned by the Gateway. Paper/live
+submission still requires an explicit `IBKR_ACCOUNT_ID`, so an order can never
+follow an accidental account selection.
 
 Start or authenticate the existing gateway using the Fable workflow, then run:
 

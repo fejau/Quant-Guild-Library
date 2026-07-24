@@ -71,7 +71,7 @@ def _execute_auto_review() -> None:
     except via the scheduler worker (already off-request).
     """
     # Lazy imports keep Flask startup light and avoid circular imports.
-    from agent import TradingAgent
+    from agent import get_strategy_agent
     from brain import (
         append_turn,
         enrich_holdings,
@@ -117,7 +117,7 @@ def _execute_auto_review() -> None:
     )
     memory = format_memory_for_llm(symbol=None)
 
-    agent = TradingAgent(allow_staging=False)
+    agent = get_strategy_agent(allow_staging=False)
     result = agent.run(
         prompt,
         symbol=None,
