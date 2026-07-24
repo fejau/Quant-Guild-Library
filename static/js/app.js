@@ -158,10 +158,10 @@
     if (port && connection) {
       port.textContent = connection.label || port.textContent;
     }
-    if (src) src.textContent = source === "demo" ? "DEMO FALLBACK" : "LIVE TWS";
-    if (holdingsTag) holdingsTag.textContent = source === "tws" ? "TWS" : "DEMO";
+    if (src) src.textContent = source === "demo" ? "SAVED FALLBACK" : "LIVE IBKR";
+    if (holdingsTag) holdingsTag.textContent = source === "ibkr" ? "IBKR" : "SAVED";
     if (metricsTag) {
-      metricsTag.textContent = source === "tws" ? "TWS ACCOUNT" : "DEMO";
+      metricsTag.textContent = source === "ibkr" ? "IBKR ACCOUNT" : "SAVED";
     }
   }
 
@@ -271,7 +271,7 @@
 
     const roleEl = document.createElement("div");
     roleEl.className = "chat-role";
-    roleEl.textContent = role === "assistant" ? "ASTB" : "YOU";
+    roleEl.textContent = role === "assistant" ? "FJ IBKR" : "YOU";
 
     const body = document.createElement("div");
     body.className = "chat-body";
@@ -546,15 +546,10 @@
           ? ` UI last/marketPrice≈$${last.toFixed(2)}.`
           : "";
       const prompt = missing
-        ? `Research ${sym} and create a full thesis — narrative, OPTIMISTIC target strictly above current last, cost basis, and conviction — then call save_thesis.${lastHint} Prefer get_portfolio / get_historical_bars if get_market_snapshot fails or times out. Do not ask the UX for approval. Never set target equal to last price.`
-        : `Revaluate ${sym} and ACT (do not ask the UX whether to proceed).${lastHint} ` +
-          `Priority: (R) overweight vs max_single_name / cash_floor / avoid-list → EXECUTE risk trim or exit first ` +
-          `(propose_position_size SELL target_weight_pct=max_single_name for trim, or liquidate=true if no upside / avoid); ` +
-          `(B) at/through target or thesis played out → FULL liquidation liquidate=true → place_equity_order(confirm=true) → record_trade; ` +
-          `(C) thesis invalidated → full exit + save_thesis; ` +
-          `(A) valid + upside → HOLD residual; save_thesis OPTIMISTIC target STRICTLY ABOVE last (never target=last); optional BUY if underweight + cash allows; ` +
-          `(D) no material change → one short affirmation. ` +
-          `Skip qualify_stock for portfolio names. Prefer get_portfolio marketPrice if snapshot fails. Summarize what you DID.`;
+        ? `Research ${sym} and create an evidence-based thesis with narrative, target, cost basis, conviction, and key risks, then call save_thesis.${lastHint} Use IBKR portfolio and historical data. This is research-only; do not stage or claim any trade.`
+        : `Re-evaluate the saved ${sym} thesis against current IBKR portfolio data and objectives.${lastHint} ` +
+          `Identify material changes, concentration or cash-floor concerns, and whether the thesis remains supported. ` +
+          `Update save_thesis only if the evidence warrants it. This button is research-only: do not stage, submit, or claim any trade.`;
       await sendChatMessage(prompt);
     });
   }
@@ -934,4 +929,122 @@
       objCancelBtn.disabled = false;
     }
   });
+
+  // --- Staged order review ------------------------------------------------
+  const stagedOrders = document.getElementById("staged-orders");
+  const tradingMode = document.getElementById("trading-mode");
+  const tradingState = document.getElementById("trading-state");
+  const tradingBlockers = document.getElementById("trading-blockers");
+  const localActionToken = document.body.dataset.localActionToken || "";
+
+  function orderButton(label, className, handler) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = className;
+    button.textContent = label;
+    button.addEventListener("click", handler);
+    return button;
+  }
+
+  async function actOnOrder(order, action) {
+    const verb = action === "submit" ? "SUBMIT" : "REJECT";
+    const phrase = `${verb} ${order.id.slice(-6).toUpperCase()}`;
+    const entered = window.prompt(
+      `${verb} this exact ${order.side} ${order.quantity} ${order.symbol} proposal?\n\nType: ${phrase}`
+    );
+    if (entered === null) return;
+    try {
+      const response = await fetch(`/api/orders/${order.id}/${action}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Local-Action-Token": localActionToken,
+        },
+        body: JSON.stringify({ confirmation: entered }),
+      });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || `${action} failed`);
+      await refreshStagedOrders();
+    } catch (error) {
+      window.alert(error.message || "Order action failed");
+      await refreshStagedOrders();
+    }
+  }
+
+  function renderStagedOrders(orders, trading) {
+    if (!stagedOrders) return;
+    stagedOrders.replaceChildren();
+    const active = (orders || []).filter((order) =>
+      ["staged", "broker_warning"].includes(order.status)
+    );
+    if (!active.length) {
+      const empty = document.createElement("div");
+      empty.className = "order-empty";
+      empty.textContent = "No staged proposals.";
+      stagedOrders.appendChild(empty);
+      return;
+    }
+    active.forEach((order) => {
+      const row = document.createElement("article");
+      row.className = `staged-order status-${order.status}`;
+      const details = document.createElement("div");
+      details.className = "order-details";
+      const title = document.createElement("strong");
+      title.textContent =
+        `${order.side} ${order.quantity} ${order.symbol} · ${order.order_type}` +
+        (order.limit_price ? ` @ $${Number(order.limit_price).toFixed(2)}` : "");
+      const meta = document.createElement("span");
+      meta.textContent =
+        `${order.status.toUpperCase()} · expires ${order.expires_at}` +
+        (order.warning ? " · IBKR WARNING NOT CONFIRMED" : "");
+      details.append(title, meta);
+      row.appendChild(details);
+
+      if (order.status === "staged") {
+        const actions = document.createElement("div");
+        actions.className = "order-actions";
+        if (trading && trading.submission_armed) {
+          actions.appendChild(
+            orderButton("SUBMIT", "text-btn primary", () => actOnOrder(order, "submit"))
+          );
+        }
+        actions.appendChild(
+          orderButton("REJECT", "text-btn", () => actOnOrder(order, "reject"))
+        );
+        row.appendChild(actions);
+      }
+      stagedOrders.appendChild(row);
+    });
+  }
+
+  async function refreshStagedOrders() {
+    if (!stagedOrders) return;
+    try {
+      const response = await fetch("/api/orders/staged");
+      const payload = await response.json();
+      const trading = payload.trading || {};
+      if (tradingMode) {
+        tradingMode.textContent = String(trading.mode || "readonly").toUpperCase();
+        tradingMode.className = `panel-tag trading-mode mode-${trading.mode || "readonly"}`;
+      }
+      if (tradingState) {
+        tradingState.textContent = trading.read_only
+          ? "READ-ONLY — NO ORDER TOOL"
+          : trading.submission_armed
+            ? "HUMAN APPROVAL REQUIRED"
+            : "SUBMISSION BLOCKED";
+      }
+      if (tradingBlockers) {
+        tradingBlockers.textContent = (trading.blockers || []).length
+          ? `BLOCKERS: ${trading.blockers.join(", ")}`
+          : "";
+      }
+      renderStagedOrders(payload.orders || [], trading);
+    } catch (_) {
+      /* keep the last known state */
+    }
+  }
+
+  refreshStagedOrders();
+  window.setInterval(refreshStagedOrders, 10000);
 })();

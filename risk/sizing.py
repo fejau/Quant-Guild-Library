@@ -97,6 +97,12 @@ def propose_position_size(
     if not acct.get("ok"):
         return acct
     tags = _summary_map(acct.get("summary") or [])
+    exchange_rates = {
+        str(currency).upper(): float(node.get("exchangerate") or 1)
+        for currency, node in (acct.get("ledger") or {}).items()
+        if isinstance(node, dict)
+    }
+    exchange_rates["BASE"] = 1.0
     nav = tags.get("NetLiquidation") or tags.get("EquityWithLoanValue")
     cash = tags.get("TotalCashValue") or tags.get("AvailableFunds") or tags.get("CashBalance")
     if not nav or nav <= 0:
@@ -114,9 +120,12 @@ def propose_position_size(
 
     current_mv = 0.0
     current_qty = 0.0
+    quote_currency = "USD"
     for item in port.get("portfolio") or []:
         if str(item.get("symbol", "")).upper() == symbol:
-            current_mv += float(item.get("marketValue") or 0)
+            quote_currency = str(item.get("currency") or "USD").upper()
+            fx = exchange_rates.get(quote_currency, 1.0)
+            current_mv += float(item.get("marketValue") or 0) * fx
             current_qty += float(item.get("position") or 0)
 
     if entry_price is None or entry_price <= 0:
@@ -138,6 +147,8 @@ def propose_position_size(
                     "snapshot": snap if "snap" in locals() else None,
                 }
 
+    fx = exchange_rates.get(quote_currency, 1.0)
+    entry_price_base = entry_price * fx
     scale = CONVICTION_SCALE.get(conviction.strip().lower(), 0.70)
     if target_weight_pct is not None:
         desired_weight = _parse_pct(target_weight_pct, max_single * scale)
@@ -178,13 +189,13 @@ def propose_position_size(
 
         # Optional stop-based risk sizing
         if stop_price is not None and stop_price > 0:
-            risk_per_share = abs(entry_price - float(stop_price))
+            risk_per_share = abs(entry_price - float(stop_price)) * fx
             if risk_per_share <= 0:
                 blockers.append("stop_price equals entry; risk sizing undefined")
             else:
                 risk_budget = risk_frac * nav
                 risk_shares = int(risk_budget // risk_per_share)
-                risk_notional = risk_shares * entry_price
+                risk_notional = risk_shares * entry_price_base
                 if risk_notional < delta_mv:
                     delta_mv = risk_notional
                     constraints.append(
@@ -192,14 +203,15 @@ def propose_position_size(
                         f"(${risk_budget:,.2f}, stop={stop_price})"
                     )
 
-        shares = int(delta_mv // entry_price)
+        shares = int(delta_mv // entry_price_base)
         if shares <= 0:
             blockers.append(
                 "Proposed BUY size is 0 shares after constraints "
                 "(at weight cap, cash floor, or price too high)"
             )
         signed_shares = shares
-        notional = shares * entry_price
+        notional_quote = shares * entry_price
+        notional = shares * entry_price_base
         weight_after = (current_mv + notional) / nav
         cash_after = float(cash) - notional
 
@@ -218,7 +230,10 @@ def propose_position_size(
         else:
             target_mv = desired_weight * nav
             reduce_mv = max(0.0, current_mv - target_mv)
-            shares = min(int(long_qty), int(reduce_mv // entry_price) if entry_price else 0)
+            shares = min(
+                int(long_qty),
+                int(reduce_mv // entry_price_base) if entry_price_base else 0,
+            )
             if shares <= 0:
                 return {
                     "ok": False,
@@ -241,7 +256,8 @@ def propose_position_size(
             )
 
         signed_shares = shares
-        notional = shares * entry_price
+        notional_quote = shares * entry_price
+        notional = shares * entry_price_base
         weight_after = max(0.0, (current_mv - notional) / nav)
         cash_after = float(cash) + notional
 
@@ -251,7 +267,9 @@ def propose_position_size(
         "side": side_u,
         "shares": signed_shares,
         "entry_price": round(entry_price, 4),
-        "notional": round(notional, 2),
+        "quote_currency": quote_currency,
+        "notional": round(notional_quote, 2),
+        "notional_base": round(notional, 2),
         "conviction": conviction,
         "liquidate": bool(liquidate) or desired_weight <= 0,
         "desired_weight_pct": round(desired_weight * 100, 3),

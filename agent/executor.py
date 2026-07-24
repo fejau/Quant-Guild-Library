@@ -1,27 +1,23 @@
-"""Dispatch OpenAI tool calls to IB bridge, risk sizing, and brain memory."""
+"""Dispatch AI tool calls. There is intentionally no broker-submit handler."""
 
 from __future__ import annotations
 
 import json
-import traceback
 from typing import Any, Callable
 
 from brain import brain_overview, record_trade, upsert_thesis
+from config import get_settings
 from ib_bridge import (
-    cancel_order,
     get_account_summary,
     get_historical_bars,
-    get_historical_news,
     get_market_snapshot,
-    get_news_article,
-    get_news_providers,
     get_open_orders,
     get_portfolio,
     get_positions,
-    place_equity_order,
     qualify_stock,
 )
 from risk import get_portfolio_objectives, propose_position_size
+from trading import stage_equity_order
 
 Handler = Callable[..., dict[str, Any]]
 
@@ -30,68 +26,31 @@ def _get_brain_summary() -> dict[str, Any]:
     return {"ok": True, "brain": brain_overview()}
 
 
-def _save_thesis(
-    symbol: str,
-    narrative: str,
-    conviction: str = "Medium",
-    target: float | None = None,
-    entry: float | None = None,
-    cost_basis: float | None = None,
-    horizon: str = "",
-    notes: str = "",
-) -> dict[str, Any]:
-    row = upsert_thesis(
-        symbol=symbol,
-        narrative=narrative,
-        target=target,
-        entry=entry,
-        cost_basis=cost_basis if cost_basis is not None else entry,
-        conviction=conviction,
-        horizon=horizon,
-        notes=notes,
-        source="agent",
-        supersede_active=True,
-    )
-    return {"ok": True, "thesis": row}
+def _save_thesis(**kwargs: Any) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "thesis": upsert_thesis(
+            source="agent",
+            supersede_active=True,
+            **kwargs,
+        ),
+    }
 
 
-def _record_trade(
-    symbol: str,
-    side: str,
-    qty: float,
-    price: float | None = None,
-    rationale: str = "",
-    thesis_id: str = "",
-    status: str = "noted",
-) -> dict[str, Any]:
-    row = record_trade(
-        symbol=symbol,
-        side=side,
-        qty=qty,
-        price=price,
-        rationale=rationale,
-        thesis_id=thesis_id,
-        status=status or "noted",
-        source="agent",
-    )
-    return {"ok": True, "trade": row}
+def _record_trade(**kwargs: Any) -> dict[str, Any]:
+    return {"ok": True, "trade": record_trade(source="agent", **kwargs)}
 
 
-_HANDLERS: dict[str, Handler] = {
+_READ_HANDLERS: dict[str, Handler] = {
     "qualify_stock": qualify_stock,
     "get_market_snapshot": get_market_snapshot,
     "get_historical_bars": get_historical_bars,
-    "get_news_providers": get_news_providers,
-    "get_historical_news": get_historical_news,
-    "get_news_article": get_news_article,
     "get_account_summary": get_account_summary,
     "get_positions": get_positions,
     "get_portfolio": get_portfolio,
+    "get_open_orders": get_open_orders,
     "get_portfolio_objectives": get_portfolio_objectives,
     "propose_position_size": propose_position_size,
-    "place_equity_order": place_equity_order,
-    "get_open_orders": get_open_orders,
-    "cancel_order": cancel_order,
     "get_brain_summary": _get_brain_summary,
     "save_thesis": _save_thesis,
     "record_trade": _record_trade,
@@ -99,52 +58,36 @@ _HANDLERS: dict[str, Handler] = {
 
 
 def available_tools() -> list[str]:
-    return sorted(_HANDLERS.keys())
+    names = list(_READ_HANDLERS)
+    if get_settings(require_openai=False).staging_enabled:
+        names.append("stage_equity_order")
+    return sorted(names)
 
 
 def execute_tool(name: str, arguments: dict[str, Any] | str | None) -> str:
-    """
-    Run one tool and return a JSON string for the OpenAI tool message content.
-    Never raises — errors are encoded in the payload so the LLM can recover.
-    """
     if isinstance(arguments, str):
         try:
             arguments = json.loads(arguments) if arguments.strip() else {}
         except json.JSONDecodeError as exc:
-            return json.dumps(
-                {"ok": False, "error": f"Invalid tool arguments JSON: {exc}"}
-            )
-
+            return json.dumps({"ok": False, "error": f"Invalid tool arguments: {exc}"})
     args = arguments or {}
     if not isinstance(args, dict):
         return json.dumps({"ok": False, "error": "Tool arguments must be an object"})
 
-    handler = _HANDLERS.get(name)
+    handler = _READ_HANDLERS.get(name)
+    if name == "stage_equity_order":
+        if not get_settings(require_openai=False).staging_enabled:
+            return json.dumps(
+                {"ok": False, "submitted": False, "error": "Staging disabled in readonly mode"}
+            )
+        handler = stage_equity_order
     if handler is None:
         return json.dumps(
-            {
-                "ok": False,
-                "error": f"Unknown tool: {name}",
-                "available": available_tools(),
-            }
+            {"ok": False, "error": f"Unknown or unavailable tool: {name}"}
         )
-
     try:
-        result = handler(**args)
-        return json.dumps(result, default=str)
+        return json.dumps(handler(**args), default=str)
     except TypeError as exc:
-        return json.dumps(
-            {
-                "ok": False,
-                "error": f"Bad arguments for {name}: {exc}",
-                "arguments": args,
-            }
-        )
+        return json.dumps({"ok": False, "error": f"Bad arguments for {name}: {exc}"})
     except Exception as exc:
-        return json.dumps(
-            {
-                "ok": False,
-                "error": f"{type(exc).__name__}: {exc}",
-                "traceback": traceback.format_exc()[-1500:],
-            }
-        )
+        return json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"})

@@ -1,4 +1,4 @@
-openai>=1.0.0
-ib_insync>=0.9.86
-flask>=3.0.0
-python-dotenv>=1.0.0
+flask>=3.0,<4
+httpx>=0.27,<1
+openai>=1.0,<3
+python-dotenv>=1.0,<2

@@ -10,7 +10,7 @@ from typing import Any
 from openai import OpenAI
 
 from agent.executor import execute_tool
-from agent.schemas import SYSTEM_PROMPT, TOOL_DEFINITIONS
+from agent.schemas import SYSTEM_PROMPT, tool_definitions
 from config import Settings, get_settings
 
 
@@ -75,9 +75,12 @@ class TradingAgent:
         self,
         settings: Settings | None = None,
         client: OpenAI | None = None,
+        *,
+        allow_staging: bool = True,
     ) -> None:
         self.settings = settings or get_settings()
         self.client = client or OpenAI(api_key=self.settings.openai_api_key)
+        self.allow_staging = allow_staging
 
     def _build_messages(
         self,
@@ -208,7 +211,15 @@ class TradingAgent:
                 stream = self.client.chat.completions.create(
                     model=model,
                     messages=messages,
-                    tools=TOOL_DEFINITIONS,
+                    tools=(
+                        tool_definitions(self.settings)
+                        if self.allow_staging
+                        else [
+                            tool
+                            for tool in tool_definitions(self.settings)
+                            if tool["function"]["name"] != "stage_equity_order"
+                        ]
+                    ),
                     tool_choice="auto",
                     temperature=0.2,
                     stream=True,

@@ -1,108 +1,228 @@
-"""Central configuration loaded from environment variables."""
+"""Fail-closed configuration for the IBKR Client Portal Gateway integration."""
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping
 
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 
-# override=True so editing .env + Flask reload actually picks up new flags
-# (default dotenv leaves stale os.environ values from the first load).
-load_dotenv(override=True)
-
-
-def reload_env() -> None:
-    """Re-read .env into os.environ (wins over prior values)."""
-    load_dotenv(override=True)
+PROJECT_ROOT = Path(__file__).resolve().parent
+LOCAL_ENV_PATH = PROJECT_ROOT / ".env"
+LIVE_CONFIRM_VALUE = "I_UNDERSTAND_LIVE_IBKR_RISK"
+VALID_TRADING_MODES = frozenset({"readonly", "paper", "live"})
 
 
-def _env_bool(name: str, default: str = "false") -> bool:
-    return os.getenv(name, default).strip().lower() in {"1", "true", "yes"}
+def _env_values() -> dict[str, str]:
+    """
+    Resolve configuration without copying secrets between projects.
+
+    Precedence:
+      process environment > this project's .env > shared Fable .env
+    """
+    local_raw = {
+        key: str(value)
+        for key, value in dotenv_values(LOCAL_ENV_PATH).items()
+        if value is not None
+    }
+    shared: dict[str, str] = {}
+    shared_path = local_raw.get("IBKR_SHARED_ENV_FILE") or os.environ.get(
+        "IBKR_SHARED_ENV_FILE", ""
+    )
+    if shared_path:
+        path = Path(shared_path).expanduser()
+        if path.is_file():
+            shared = {
+                key: str(value)
+                for key, value in dotenv_values(path).items()
+                if value is not None
+            }
+    merged = {**shared, **local_raw}
+    merged.update({key: str(value) for key, value in os.environ.items()})
+    return merged
+
+
+def _bool(values: Mapping[str, str], name: str, default: bool = False) -> bool:
+    raw = values.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _float(values: Mapping[str, str], name: str, default: float) -> float:
+    raw = values.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return float(raw)
+
+
+def _int(values: Mapping[str, str], name: str, default: int) -> int:
+    raw = values.get(name)
+    if raw is None or not raw.strip():
+        return default
+    return int(raw)
+
+
+def _symbols(raw: str | None) -> frozenset[str]:
+    return frozenset(
+        token.strip().upper()
+        for token in (raw or "").split(",")
+        if token.strip()
+    )
 
 
 @dataclass(frozen=True)
 class Settings:
     openai_api_key: str
     openai_model: str
-    ib_host: str
-    ib_port: int
-    ib_client_id: int
-    ib_readonly: bool
-    ib_allow_orders: bool
-    ib_max_order_notional: float
     agent_max_iterations: int
+    gateway_url: str
+    ibkr_account_id: str
+    trading_mode: str
+    live_trading_enabled: bool
+    live_trading_confirm: str
+    paper_trading_enabled: bool
+    allowed_symbols: frozenset[str]
+    max_order_notional: float
+    max_position_pct: float
+    allow_shorting: bool
+    require_limit_orders: bool
+    stage_ttl_seconds: int
+    app_host: str
+    app_port: int
+    app_debug: bool
+
+    @property
+    def submission_armed(self) -> bool:
+        if not self.ibkr_account_id or not self.allowed_symbols:
+            return False
+        if self.trading_mode == "paper":
+            return self.paper_trading_enabled and self.ibkr_account_id.upper().startswith(
+                "DU"
+            )
+        if self.trading_mode == "live":
+            return (
+                self.live_trading_enabled
+                and self.live_trading_confirm == LIVE_CONFIRM_VALUE
+                and not self.ibkr_account_id.upper().startswith("DU")
+            )
+        return False
+
+    @property
+    def staging_enabled(self) -> bool:
+        return self.trading_mode in {"paper", "live"}
 
 
-def get_ib_settings() -> tuple[str, int, int, bool]:
-    """IB connection settings only (no OpenAI key required)."""
-    reload_env()
-    allow = _env_bool("IB_ALLOW_ORDERS", "false")
-    # If orders are allowed, force a non-readonly session.
-    readonly = _env_bool("IB_READONLY", "true") and not allow
-    base_client_id = int(os.getenv("IB_CLIENT_ID", "1"))
-    # Flask debug reloader runs parent+child with the same .env clientId. Two
-    # sockets on one clientId steal messages and leave later orders PendingSubmit.
-    # Offset by PID so each process gets a unique id (still deterministic).
-    client_id = base_client_id + (os.getpid() % 200)
-    return (
-        os.getenv("IB_HOST", "127.0.0.1").strip(),
-        int(os.getenv("IB_PORT", "7497")),
-        client_id,
-        readonly,
+def get_settings(*, require_openai: bool = True) -> Settings:
+    values = _env_values()
+    mode = values.get("IBKR_TRADING_MODE", "readonly").strip().lower()
+    if mode not in VALID_TRADING_MODES:
+        raise RuntimeError(
+            "IBKR_TRADING_MODE must be one of: readonly, paper, live"
+        )
+
+    key = values.get("OPENAI_API_KEY", "").strip()
+    if require_openai and not key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. The IBKR dashboard remains available, "
+            "but chat requires a key in the local .env."
+        )
+
+    max_notional = _float(values, "IBKR_MAX_ORDER_NOTIONAL", 500.0)
+    max_position_pct = _float(values, "IBKR_MAX_POSITION_PCT", 0.05)
+    stage_ttl = _int(values, "IBKR_STAGE_TTL_SECONDS", 900)
+    if max_notional <= 0:
+        raise RuntimeError("IBKR_MAX_ORDER_NOTIONAL must be positive")
+    if not 0 < max_position_pct <= 1:
+        raise RuntimeError("IBKR_MAX_POSITION_PCT must be between 0 and 1")
+    if not 60 <= stage_ttl <= 86400:
+        raise RuntimeError("IBKR_STAGE_TTL_SECONDS must be between 60 and 86400")
+
+    return Settings(
+        openai_api_key=key,
+        openai_model=values.get("OPENAI_MODEL", "gpt-4o").strip(),
+        agent_max_iterations=_int(values, "AGENT_MAX_ITERATIONS", 12),
+        gateway_url=values.get(
+            "GATEWAY_URL", "https://localhost:5001/v1/api"
+        ).strip(),
+        ibkr_account_id=values.get("IBKR_ACCOUNT_ID", "").strip(),
+        trading_mode=mode,
+        live_trading_enabled=_bool(values, "IBKR_LIVE_TRADING_ENABLED"),
+        live_trading_confirm=values.get(
+            "IBKR_LIVE_TRADING_CONFIRM", ""
+        ).strip(),
+        paper_trading_enabled=_bool(values, "IBKR_PAPER_TRADING_ENABLED"),
+        allowed_symbols=_symbols(values.get("IBKR_ALLOWED_SYMBOLS")),
+        max_order_notional=max_notional,
+        max_position_pct=max_position_pct,
+        allow_shorting=_bool(values, "IBKR_ALLOW_SHORTING"),
+        require_limit_orders=_bool(
+            values, "IBKR_REQUIRE_LIMIT_ORDERS", default=True
+        ),
+        stage_ttl_seconds=stage_ttl,
+        app_host=values.get("APP_HOST", "127.0.0.1").strip(),
+        app_port=_int(values, "APP_PORT", 5050),
+        app_debug=_bool(values, "APP_DEBUG"),
     )
 
 
-def order_mode_status() -> dict[str, object]:
-    """Current order-permission flags for diagnostics / tool errors."""
-    reload_env()
-    allow_raw = _env_bool("IB_ALLOW_ORDERS", "false")
-    readonly_raw = _env_bool("IB_READONLY", "true")
-    host, port, client_id, readonly_effective = get_ib_settings()
-    allowed = allow_raw and not readonly_effective
+def _masked_account(account_id: str) -> str | None:
+    if not account_id:
+        return None
+    if len(account_id) <= 4:
+        return "*" * len(account_id)
+    return f"{account_id[:2]}…{account_id[-3:]}"
+
+
+def trading_mode_status() -> dict[str, object]:
+    settings = get_settings(require_openai=False)
+    blockers: list[str] = []
+    if settings.trading_mode == "readonly":
+        blockers.append("mode_is_readonly")
+    if settings.trading_mode == "paper":
+        if not settings.paper_trading_enabled:
+            blockers.append("paper_gate_disabled")
+        if settings.ibkr_account_id and not settings.ibkr_account_id.upper().startswith(
+            "DU"
+        ):
+            blockers.append("configured_account_is_not_paper")
+    if settings.trading_mode == "live":
+        if not settings.live_trading_enabled:
+            blockers.append("live_gate_disabled")
+        if settings.live_trading_confirm != LIVE_CONFIRM_VALUE:
+            blockers.append("live_confirmation_missing")
+        if settings.ibkr_account_id.upper().startswith("DU"):
+            blockers.append("configured_account_is_paper")
+    if not settings.ibkr_account_id:
+        blockers.append("account_id_missing")
+    if not settings.allowed_symbols:
+        blockers.append("symbol_allowlist_empty")
+
     return {
-        "IB_ALLOW_ORDERS": allow_raw,
-        "IB_READONLY": readonly_raw,
-        "ib_connect_readonly": readonly_effective,
-        "orders_allowed": allowed,
-        "host": host,
-        "port": port,
-        "client_id": client_id,
+        "mode": settings.trading_mode,
+        "read_only": settings.trading_mode == "readonly",
+        "staging_enabled": settings.staging_enabled,
+        "submission_armed": settings.submission_armed,
+        "account": _masked_account(settings.ibkr_account_id),
+        "allowed_symbols": sorted(settings.allowed_symbols),
+        "max_order_notional": settings.max_order_notional,
+        "max_position_pct": settings.max_position_pct,
+        "allow_shorting": settings.allow_shorting,
+        "require_limit_orders": settings.require_limit_orders,
+        "blockers": blockers,
     }
 
 
+# Compatibility names used by the original UI and risk layer.
+def order_mode_status() -> dict[str, object]:
+    return trading_mode_status()
+
+
 def orders_allowed() -> bool:
-    """True only when explicitly enabled (and connection is not readonly)."""
-    return bool(order_mode_status()["orders_allowed"])
+    return bool(trading_mode_status()["submission_armed"])
 
 
 def get_max_order_notional() -> float:
-    reload_env()
-    return float(os.getenv("IB_MAX_ORDER_NOTIONAL", "50000"))
-
-
-def get_ib_request_timeout() -> float:
-    """Seconds before IB request waits raise (qualify, hist, etc.). 0 = wait forever."""
-    reload_env()
-    return float(os.getenv("IB_REQUEST_TIMEOUT", "10"))
-
-
-def get_settings() -> Settings:
-    reload_env()
-    key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not key:
-        raise RuntimeError(
-            "OPENAI_API_KEY is not set. Copy .env.example to .env and add your key."
-        )
-    host, port, client_id, readonly = get_ib_settings()
-    return Settings(
-        openai_api_key=key,
-        openai_model=os.getenv("OPENAI_MODEL", "gpt-4o").strip(),
-        ib_host=host,
-        ib_port=port,
-        ib_client_id=client_id,
-        ib_readonly=readonly,
-        ib_allow_orders=orders_allowed(),
-        ib_max_order_notional=get_max_order_notional(),
-        agent_max_iterations=int(os.getenv("AGENT_MAX_ITERATIONS", "18")),
-    )
+    return get_settings(require_openai=False).max_order_notional

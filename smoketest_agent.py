@@ -1,25 +1,19 @@
-"""Smoke test: LLM tool-calling loop against live TWS (news + snapshot)."""
+"""Optional smoke test: read-only LLM tool loop against the local IBKR Gateway."""
 
 from __future__ import annotations
-
-import asyncio
-
-# Python 3.14+: create a loop before importing ib_insync/eventkit
-asyncio.set_event_loop(asyncio.new_event_loop())
 
 from agent import TradingAgent
 from ib_bridge import disconnect_ib
 
 
 def main() -> None:
-    print("Running TradingAgent with IB tools (requires TWS + OPENAI_API_KEY)...")
-    agent = TradingAgent()
+    print("Running read-only TradingAgent (requires Gateway + OPENAI_API_KEY)...")
+    agent = TradingAgent(allow_staging=False)
     result = agent.run(
         (
-            "For AMD: pull a market snapshot and the 3 most recent news headlines. "
-            "Summarize what you found in 5 bullets. Do not invent prices."
+            "Read the configured account summary and positions. Summarize the "
+            "largest visible risks without staging or submitting an order."
         ),
-        symbol="AMD",
     )
 
     print(f"\nModel: {result.model}")

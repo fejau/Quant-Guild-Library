@@ -117,7 +117,7 @@ def _execute_auto_review() -> None:
     )
     memory = format_memory_for_llm(symbol=None)
 
-    agent = TradingAgent()
+    agent = TradingAgent(allow_staging=False)
     result = agent.run(
         prompt,
         symbol=None,

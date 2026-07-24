@@ -3,23 +3,15 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>ASTB // PORTFOLIO TERMINAL</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet" />
+  <title>FJ IBKR // PORTFOLIO TERMINAL</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/terminal.css') }}" />
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" crossorigin />
-  <script src="https://cdn.jsdelivr.net/npm/marked@14.1.3/marked.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
 </head>
-<body>
+<body data-local-action-token="{{ local_action_token }}">
   <div class="terminal">
     <header class="topbar">
       <div class="brand">
-        <span class="brand-mark">ASTB</span>
-        <span class="brand-sub">AI STOCK TRADING BOT</span>
+        <span class="brand-mark">FJ IBKR</span>
+        <span class="brand-sub">RESEARCH + CONTROL TERMINAL</span>
       </div>
       <div class="topbar-meta" id="connection-meta"
            data-source="{{ data_source }}"
@@ -31,7 +23,7 @@
         <span class="sep">|</span>
         <span id="conn-port">{{ connection.label }}</span>
         <span class="sep">|</span>
-        <span id="conn-source">{% if data_source == 'demo' %}DEMO FALLBACK{% else %}LIVE TWS{% endif %}</span>
+        <span id="conn-source">{% if data_source == 'demo' %}SAVED FALLBACK{% else %}LIVE IBKR{% endif %}</span>
         <span class="sep">|</span>
         <span id="brain-meta" title="{{ brain.summary if brain else '' }}">
           BRAIN
@@ -45,7 +37,7 @@
         <section class="panel metrics-panel">
       <div class="panel-head">
         <h1>KEY PORTFOLIO METRICS</h1>
-        <span class="panel-tag" id="metrics-source-tag">{{ 'TWS ACCOUNT' if data_source == 'tws' else 'DEMO' }}</span>
+        <span class="panel-tag" id="metrics-source-tag">{{ 'IBKR ACCOUNT' if data_source == 'ibkr' else 'SAVED' }}</span>
       </div>
       <div class="metrics-grid" id="metrics-grid">
         {% for m in metrics %}
@@ -63,7 +55,7 @@
         <section class="panel holdings-panel">
           <div class="panel-head">
             <h2>HOLDINGS</h2>
-            <span class="panel-tag" id="holdings-source-tag">{{ 'TWS' if data_source == 'tws' else 'DEMO' }}</span>
+            <span class="panel-tag" id="holdings-source-tag">{{ 'IBKR' if data_source == 'ibkr' else 'SAVED' }}</span>
           </div>
           <div class="table-wrap">
             <table class="holdings-table" id="holdings-table">
@@ -256,6 +248,40 @@
           </div>
         </section>
 
+        <section class="panel trading-panel" id="trading-panel">
+          <div class="panel-head">
+            <h2>ORDER CONTROL</h2>
+            <span
+              class="panel-tag trading-mode mode-{{ trading.mode }}"
+              id="trading-mode"
+            >{{ trading.mode | upper }}</span>
+          </div>
+          <div class="trading-summary">
+            <div>
+              <strong id="trading-state">
+                {% if trading.read_only %}
+                  READ-ONLY — NO ORDER TOOL
+                {% elif trading.submission_armed %}
+                  HUMAN APPROVAL REQUIRED
+                {% else %}
+                  SUBMISSION BLOCKED
+                {% endif %}
+              </strong>
+              <span>
+                Account {{ trading.account or 'not configured' }} ·
+                max ${{ "%.2f"|format(trading.max_order_notional) }} per order ·
+                max {{ "%.1f"|format(trading.max_position_pct * 100) }}% per position
+              </span>
+            </div>
+            <span id="trading-blockers">
+              {% if trading.blockers %}BLOCKERS: {{ trading.blockers | join(', ') }}{% endif %}
+            </span>
+          </div>
+          <div class="staged-orders" id="staged-orders">
+            <div class="order-empty">No staged proposals.</div>
+          </div>
+        </section>
+
         <section class="panel chat-panel">
           <div class="panel-head">
             <div class="panel-head-title">
@@ -272,7 +298,7 @@
             </div>
             <div class="panel-head-actions">
               <div class="auto-controls">
-                <label class="auto-toggle" title="Server-side async thesis reevaluation on a background thread">
+                <label class="auto-toggle" title="Research-only portfolio review on a background thread">
                   <input type="checkbox" id="auto-toggle" {% if ux and ux.automated %}checked{% endif %} />
                   <span class="auto-toggle-track" aria-hidden="true"></span>
                   <span class="auto-toggle-label">AUTOMATED</span>
@@ -299,7 +325,7 @@
           <div class="chat-log" id="chat-log" aria-live="polite">
             {% for msg in chat_seed %}
             <div class="chat-msg {{ msg.role }}">
-              <div class="chat-role">{{ "ASTB" if msg.role == "assistant" else "YOU" }}</div>
+              <div class="chat-role">{{ "FJ IBKR" if msg.role == "assistant" else "YOU" }}</div>
               <div class="chat-text">{{ msg.content }}</div>
             </div>
             {% endfor %}

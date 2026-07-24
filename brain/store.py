@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import uuid
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -10,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_WRITE_LOCK = threading.RLock()
 
 GOALS_PATH = DATA_DIR / "goals.json"
 THESES_PATH = DATA_DIR / "theses.json"
@@ -52,9 +55,18 @@ def _read_json(path: Path, default: Any) -> Any:
 
 def _write_json(path: Path, payload: Any) -> None:
     _ensure_dir()
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with _WRITE_LOCK:
+        try:
+            with temp.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, path)
+        finally:
+            if temp.exists():
+                temp.unlink()
 
 
 def _new_id(prefix: str) -> str:
@@ -573,24 +585,19 @@ def format_memory_for_llm(
         from config import order_mode_status
 
         om = order_mode_status()
-        lines.append("[Order mode — live env]")
+        lines.append("[Trading mode — live configuration]")
         lines.append(
-            f"  orders_allowed={om.get('orders_allowed')} | "
-            f"IB_ALLOW_ORDERS={om.get('IB_ALLOW_ORDERS')} | "
-            f"IB_READONLY={om.get('IB_READONLY')} | "
-            f"connect_readonly={om.get('ib_connect_readonly')} | "
-            f"{om.get('host')}:{om.get('port')} clientId={om.get('client_id')}"
+            f"  mode={om.get('mode')} | read_only={om.get('read_only')} | "
+            f"staging_enabled={om.get('staging_enabled')} | "
+            f"submission_armed={om.get('submission_armed')}"
         )
-        if om.get("orders_allowed"):
+        if om.get("staging_enabled"):
             lines.append(
-                "  Orders ARE enabled. Prefer place_equity_order(confirm=true) for "
-                "risk trims, take-profits, invalidation exits, adds, and NEW IDEAS "
-                "(Path N) when deployable cash exists — do not only recommend trades."
+                "  The AI may create an unsubmitted proposal only when explicitly "
+                "requested. Separate human review is always required."
             )
         else:
-            lines.append(
-                "  Orders DISABLED — save_thesis/record_trade only; report blocker."
-            )
+            lines.append("  Readonly: no staging or submission tools are available.")
         lines.append("")
     except Exception:
         pass

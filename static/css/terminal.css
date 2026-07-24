@@ -17,8 +17,8 @@
   --up: #3ddc84;
   --down: #ff4d4d;
   --grid: rgba(255, 106, 0, 0.04);
-  --font-data: "IBM Plex Mono", ui-monospace, monospace;
-  --font-ui: "Barlow Condensed", "Arial Narrow", sans-serif;
+  --font-data: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+  --font-ui: "Arial Narrow", "Helvetica Neue", sans-serif;
 }
 
 *,
@@ -971,6 +971,55 @@ body {
 .chat-form button:disabled {
   opacity: 0.55;
   cursor: wait;
+}
+
+.trading-panel {
+  min-height: 126px;
+}
+
+.trading-summary,
+.staged-order {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.trading-summary > div,
+.order-details {
+  display: grid;
+  gap: 4px;
+}
+
+.trading-summary span,
+.order-details span,
+.order-empty {
+  color: var(--text-mute);
+  font-size: 11px;
+}
+
+.order-empty {
+  padding: 14px;
+}
+
+.order-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.mode-readonly {
+  color: var(--text-dim);
+}
+
+.mode-paper {
+  color: var(--amber);
+}
+
+.mode-live,
+.status-broker_warning {
+  color: var(--down);
 }
 
 /* Scrollbars */

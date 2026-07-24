@@ -1,0 +1,21 @@
+.venv/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Runtime state contains account-derived portfolio data and must stay local.
+data/*.json
+data/*.tmp
+data/*.lock
+
+# Local logs / exports.
+logs/
+output/

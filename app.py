@@ -1,7 +1,9 @@
-"""AI Stock Trading Bot — Bloomberg-style terminal UI + LLM/IB agent."""
+"""Felix IBKR research and human-approved trading terminal."""
 
 from __future__ import annotations
 
+import ipaddress
+import secrets
 from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, render_template, request, stream_with_context
@@ -31,19 +33,22 @@ from brain import (
     start_auto_scheduler,
 )
 from brain.policy import auto_sweep_prompt, build_auto_sweep_context
+from config import get_settings, trading_mode_status
 from ib_bridge.ui_portfolio import connection_info, fetch_live_portfolio_for_ui
 from risk.objectives import load_objectives
+from trading import OrderStore, approval_phrase, submit_staged_order
 
 app = Flask(__name__)
+LOCAL_ACTION_TOKEN = secrets.token_urlsafe(32)
 
-# Offline fallback metrics only — replaced by TWS account tags when connected.
+# Offline fallback metrics only — replaced by IBKR account tags when connected.
 DEMO_PORTFOLIO_METRICS = [
-    {"id": "nav", "label": "PORTFOLIO NAV", "value": "—", "delta": "TWS offline", "tone": "neutral"},
-    {"id": "cash", "label": "CASH", "value": "—", "delta": "TWS offline", "tone": "neutral"},
-    {"id": "buying_power", "label": "BUYING POWER", "value": "—", "delta": "TWS offline", "tone": "neutral"},
-    {"id": "unrealized", "label": "UNREALIZED P&L", "value": "—", "delta": "TWS offline", "tone": "neutral"},
-    {"id": "day_pnl", "label": "DAY P&L", "value": "—", "delta": "TWS offline", "tone": "neutral"},
-    {"id": "gross", "label": "GROSS EXPOSURE", "value": "—", "delta": "TWS offline", "tone": "neutral"},
+    {"id": "nav", "label": "PORTFOLIO NAV", "value": "—", "delta": "IBKR offline", "tone": "neutral"},
+    {"id": "cash", "label": "CASH", "value": "—", "delta": "IBKR offline", "tone": "neutral"},
+    {"id": "buying_power", "label": "BUYING POWER", "value": "—", "delta": "IBKR offline", "tone": "neutral"},
+    {"id": "unrealized", "label": "UNREALIZED P&L", "value": "—", "delta": "IBKR offline", "tone": "neutral"},
+    {"id": "day_pnl", "label": "REALIZED P&L", "value": "—", "delta": "IBKR offline", "tone": "neutral"},
+    {"id": "gross", "label": "GROSS EXPOSURE", "value": "—", "delta": "IBKR offline", "tone": "neutral"},
 ]
 
 
@@ -62,7 +67,7 @@ CHAT_SEED_FALLBACK = (
 )
 
 
-def _chat_seed(*, tws_note: str | None = None) -> list[dict]:
+def _chat_seed(*, ibkr_note: str | None = None) -> list[dict]:
     """Brain greeting + restored compressed chat history."""
     overview = brain_overview()
     counts = overview.get("counts") or {}
@@ -77,8 +82,8 @@ def _chat_seed(*, tws_note: str | None = None) -> list[dict]:
         "Thesis / target / cost basis for each holding come only from saved JSON "
         "(via save_thesis). High-conviction theses stay sticky unless the core thesis breaks."
     )
-    if tws_note:
-        greeting = f"{tws_note}\n\n{greeting}"
+    if ibkr_note:
+        greeting = f"{ibkr_note}\n\n{greeting}"
     restored = chat_for_ui()
     if restored:
         return [{"role": "assistant", "content": greeting}, *restored]
@@ -88,7 +93,7 @@ def _chat_seed(*, tws_note: str | None = None) -> list[dict]:
 def _merge_book_metadata(
     live_rows: list[dict], prior_book: list[dict]
 ) -> list[dict]:
-    """Keep name/sector from the prior book when TWS only returns the symbol."""
+    """Keep name/sector from the prior book when IBKR only returns the symbol."""
     prior = {str(h.get("symbol") or "").upper(): h for h in prior_book}
     merged = []
     for row in live_rows:
@@ -107,8 +112,8 @@ def _merge_book_metadata(
 
 def load_portfolio_view(*, persist: bool = True) -> dict:
     """
-    Prefer live TWS positions + account metrics.
-    Fall back to holdings.json book when TWS is down.
+    Prefer live IBKR positions + account metrics.
+    Fall back to holdings.json book when the gateway is down.
     """
     prior = load_holdings_book()
     live = fetch_live_portfolio_for_ui()
@@ -125,7 +130,7 @@ def load_portfolio_view(*, persist: bool = True) -> dict:
         except Exception:
             pass
         return {
-            "source": "tws",
+            "source": "ibkr",
             "book": book,
             "holdings": enrich_holdings(book),
             "metrics": live["metrics"],
@@ -160,6 +165,45 @@ start_auto_scheduler()
 OBJECTIVES = load_objectives()
 
 
+def _local_request() -> bool:
+    try:
+        return ipaddress.ip_address(request.remote_addr or "").is_loopback
+    except ValueError:
+        return False
+
+
+def _authorized_order_action() -> bool:
+    return (
+        _local_request()
+        and secrets.compare_digest(
+            request.headers.get("X-Local-Action-Token", ""),
+            LOCAL_ACTION_TOKEN,
+        )
+    )
+
+
+@app.before_request
+def local_only():
+    if not _local_request():
+        return jsonify({"error": "This app only accepts local requests"}), 403
+    return None
+
+
+@app.after_request
+def security_headers(response):
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; script-src 'self'; style-src 'self'; "
+        "img-src 'self' data:; connect-src 'self'; object-src 'none'; "
+        "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
+    )
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.route("/")
 def index():
     global OBJECTIVES
@@ -170,17 +214,17 @@ def index():
     conn = view["connection"]
     ux = load_ux_state()
 
-    tws_note = None
+    ibkr_note = None
     if view["source"] == "demo" and view.get("error"):
-        tws_note = (
-            f"TWS unreachable ({view['error']}). Showing last saved holdings book. "
-            f"Start TWS/Gateway on {conn.get('host')}:{conn.get('port')} "
-            "with API enabled, then refresh."
+        ibkr_note = (
+            f"IBKR Gateway unavailable ({view['error']}). Showing the last saved "
+            f"holdings book. Authenticate the Client Portal Gateway at "
+            f"{conn.get('login_url') or 'its local login page'}, then refresh."
         )
-    elif view["source"] == "tws" and not view["book"]:
-        tws_note = (
-            f"Connected to TWS {conn.get('port')} ({conn.get('mode')}), "
-            "but no stock positions were returned."
+    elif view["source"] == "ibkr" and not view["book"]:
+        ibkr_note = (
+            "Connected to the configured IBKR account, but no stock positions "
+            "were returned."
         )
 
     # Empty table placeholder so the thesis panel still renders.
@@ -214,12 +258,14 @@ def index():
         metrics=view["metrics"],
         objectives=current_goals(),
         holdings=holdings,
-        chat_seed=_chat_seed(tws_note=tws_note),
+        chat_seed=_chat_seed(ibkr_note=ibkr_note),
         brain=brain_overview(),
         as_of=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"),
         data_source=view["source"],
         connection=conn,
         ux=ux,
+        trading=trading_mode_status(),
+        local_action_token=LOCAL_ACTION_TOKEN,
     )
 
 
@@ -254,7 +300,7 @@ def api_auto_status():
 def api_auto_run():
     """Non-blocking: queue a background auto-review if idle."""
     force = bool((request.get_json(silent=True) or {}).get("force"))
-    return jsonify(run_auto_review_now(force=force or True))
+    return jsonify(run_auto_review_now(force=force))
 
 
 @app.get("/api/status")
@@ -262,7 +308,7 @@ def api_status():
     view = load_portfolio_view(persist=False)
     return jsonify(
         {
-            "ok": view["source"] == "tws",
+            "ok": view["source"] == "ibkr",
             "source": view["source"],
             "connection": view["connection"],
             "holdings_count": len(view["book"]),
@@ -270,6 +316,49 @@ def api_status():
             "brain": brain_overview(),
         }
     )
+
+
+@app.get("/api/trading/status")
+def api_trading_status():
+    return jsonify(trading_mode_status())
+
+
+@app.get("/api/orders/staged")
+def api_staged_orders():
+    return jsonify(
+        {
+            "orders": OrderStore().list(),
+            "trading": trading_mode_status(),
+        }
+    )
+
+
+@app.post("/api/orders/<order_id>/submit")
+def api_submit_staged_order(order_id: str):
+    if not _authorized_order_action():
+        return jsonify({"error": "Local action authorization failed"}), 403
+    payload = request.get_json(silent=True) or {}
+    result = submit_staged_order(order_id, str(payload.get("confirmation") or ""))
+    return jsonify(result), 200 if result.get("ok") else 409
+
+
+@app.post("/api/orders/<order_id>/reject")
+def api_reject_staged_order(order_id: str):
+    if not _authorized_order_action():
+        return jsonify({"error": "Local action authorization failed"}), 403
+    payload = request.get_json(silent=True) or {}
+    expected = f"REJECT {order_id[-6:].upper()}"
+    if str(payload.get("confirmation") or "").strip().upper() != expected:
+        return jsonify({"error": "Human confirmation phrase did not match"}), 409
+    try:
+        order = OrderStore().transition(
+            order_id,
+            from_status="staged",
+            to_status="rejected",
+        )
+    except (KeyError, RuntimeError) as exc:
+        return jsonify({"error": str(exc)}), 409
+    return jsonify({"ok": True, "order": order})
 
 
 @app.get("/api/objectives")
@@ -462,7 +551,7 @@ def api_chat():
         def event_stream():
             import json as _json
 
-            agent = TradingAgent()
+            agent = TradingAgent(allow_staging=mode != "auto_review")
             final_content = ""
             tool_calls = []
             try:
@@ -522,7 +611,7 @@ def api_chat():
         )
 
     try:
-        agent = TradingAgent()
+        agent = TradingAgent(allow_staging=mode != "auto_review")
         result = agent.run(
             message,
             symbol=symbol or None,
@@ -538,7 +627,7 @@ def api_chat():
                     "role": "assistant",
                     "content": (
                         f"Agent failed: {type(exc).__name__}: {exc}. "
-                        "Check OPENAI_API_KEY, TWS on IB_PORT, and API permissions."
+                        "Check OPENAI_API_KEY and the local IBKR Gateway session."
                     ),
                 }
             ),
@@ -582,4 +671,12 @@ def api_chat():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5050)
+    settings = get_settings(require_openai=False)
+    if settings.app_host not in {"127.0.0.1", "::1", "localhost"}:
+        raise RuntimeError("APP_HOST must be loopback; refusing a network-visible bind")
+    app.run(
+        host=settings.app_host,
+        port=settings.app_port,
+        debug=settings.app_debug,
+        use_reloader=False,
+    )
